@@ -95,6 +95,11 @@ class QarmSimulator:
         self.last_action = "No action"
         self.key_count = 0
 
+        # Physics constraint toggle (press 'p' to toggle)
+        # When False: joints can move freely in ±180° range
+        # When True: joints are constrained to hardware limits
+        self.physics_enabled = False
+
         # Command history for display
         self.command_history = []  # List of (command, action) tuples
         self.max_history = 8  # Max lines to display
@@ -205,6 +210,23 @@ class QarmSimulator:
             'end': end_pos
         }
 
+    def _get_joint_limits(self, joint_name):
+        """
+        Get effective joint limits based on physics_enabled setting.
+
+        Args:
+            joint_name: 'joint1', 'joint2', 'joint3', or 'joint4'
+
+        Returns:
+            (min_limit, max_limit) tuple in degrees
+        """
+        if self.physics_enabled:
+            # Use hardware limits
+            return self.JOINT_LIMITS[joint_name]
+        else:
+            # Free movement: ±180 degrees
+            return (-180, 180)
+
     def set_joints(self, joints):
         """
         Set joint angles
@@ -260,7 +282,7 @@ class QarmSimulator:
 
         # Joint 1: Base rotation (yaw) - angle from Y axis towards X
         j1 = np.degrees(np.arctan2(dx, dy))
-        j1 = np.clip(j1, *self.JOINT_LIMITS['joint1'])
+        j1 = np.clip(j1, *self._get_joint_limits('joint1'))
 
         # Two-link IK for joints 2 and 3 (shoulder and elbow)
         # Using law of cosines
@@ -277,7 +299,7 @@ class QarmSimulator:
         j3 = np.degrees(j3_rad)
 
         # Apply joint limits to j3
-        j3 = np.clip(j3, *self.JOINT_LIMITS['joint3'])
+        j3 = np.clip(j3, *self._get_joint_limits('joint3'))
 
         # Shoulder pitch (j2)
         # Angle to target from horizontal plane
@@ -296,7 +318,7 @@ class QarmSimulator:
         j2 = np.degrees(j2_rad)
 
         # Apply joint limits to j2
-        j2 = np.clip(j2, *self.JOINT_LIMITS['joint2'])
+        j2 = np.clip(j2, *self._get_joint_limits('joint2'))
 
         # Joint 4: Wrist rotation
         # Align end effector with target direction
@@ -349,10 +371,10 @@ class QarmSimulator:
         """
         targets = []
         for _ in range(num_samples):
-            j1 = np.random.uniform(*self.JOINT_LIMITS['joint1'])
-            j2 = np.random.uniform(*self.JOINT_LIMITS['joint2'])
-            j3 = np.random.uniform(*self.JOINT_LIMITS['joint3'])
-            j4 = np.random.uniform(*self.JOINT_LIMITS['joint4'])
+            j1 = np.random.uniform(*self._get_joint_limits('joint1'))
+            j2 = np.random.uniform(*self._get_joint_limits('joint2'))
+            j3 = np.random.uniform(*self._get_joint_limits('joint3'))
+            j4 = np.random.uniform(*self._get_joint_limits('joint4'))
             joints = [j1, j2, j3, j4]
             pos = self.forward_kinematics(joints)['end']
             targets.append({'pos': pos, 'joints': joints})
@@ -557,7 +579,8 @@ class QarmSimulator:
         # Title
         joint_info = f"J1:{self.joints[0]:.0f} J2:{self.joints[1]:.0f} J3:{self.joints[2]:.0f} J4:{self.joints[3]:.0f}"
         view_name = self.get_view_name()
-        self.ax.set_title(f'Qarm Wall-Mounted Simulation\n{joint_info}\nZoom: {self.zoom:.1f}x | View: {view_name} ({self.elev:.0f}°, {self.azim:.0f}°)', fontsize=12)
+        physics_status = "ON (Hardware)" if self.physics_enabled else "OFF (Free ±180°)"
+        self.ax.set_title(f'Qarm Wall-Mounted Simulation\n{joint_info}\nZoom: {self.zoom:.1f}x | View: {view_name} ({self.elev:.0f}°, {self.azim:.0f}°)\nPhysics Limits: {physics_status}', fontsize=12)
 
         # Set view angle
         self.ax.view_init(elev=self.elev, azim=self.azim)
@@ -951,8 +974,8 @@ class QarmSimulator:
             # Create slider axis [left, bottom, width, height]
             ax_slider = self.fig.add_axes([x_pos, y_pos, 0.40, 0.025])
 
-            # Get joint limits
-            j_min, j_max = self.JOINT_LIMITS[f'joint{joint_idx + 1}']
+            # Get joint limits (based on physics_enabled setting)
+            j_min, j_max = self._get_joint_limits(f'joint{joint_idx + 1}')
 
             # Create slider
             slider = Slider(
@@ -1017,6 +1040,23 @@ class QarmSimulator:
         self.ax.clear()
         positions = self.forward_kinematics(self.joints)
         self._redraw_quick(positions)
+        self.fig.canvas.draw_idle()
+
+    def _update_slider_ranges(self):
+        """Update slider ranges based on current physics_enabled setting"""
+        if not hasattr(self, 'joint_sliders'):
+            return
+
+        for i, slider in enumerate(self.joint_sliders):
+            joint_name = f'joint{i + 1}'
+            j_min, j_max = self._get_joint_limits(joint_name)
+            slider.valmin = j_min
+            slider.valmax = j_max
+            # Reset slider to current joint value, clipped to new range
+            current_val = np.clip(self.joints[i], j_min, j_max)
+            self.joints[i] = current_val
+            slider.set_val(current_val)
+        # Refresh display
         self.fig.canvas.draw_idle()
 
     def _add_view_buttons(self):
@@ -1260,6 +1300,7 @@ class QarmSimulator:
         print("    a/d  - Rotate view     or click view buttons")
         print("    +/-  - Zoom in/out     r    - Reset pose")
         print("    g    - Random target + IK + animation")
+        print("    p    - Toggle physics limits (ON: hardware / OFF: free ±180°)")
         print("    q    - Quit")
         print("  ════════════════════════════════════════════════")
         print("  >>> USE SLIDERS OR KEYBOARD TO CONTROL JOINTS <<<")
@@ -1302,38 +1343,38 @@ class QarmSimulator:
 
         elif cmd == '1':
             old_val = self.joints[0]
-            self.joints[0] = np.clip(self.joints[0] - step, *self.JOINT_LIMITS['joint1'])
+            self.joints[0] = np.clip(self.joints[0] - step, *self._get_joint_limits('joint1'))
             action = f"J1: {old_val:.0f} -> {self.joints[0]:.0f} (-)"
         elif cmd == '2':
             old_val = self.joints[0]
-            self.joints[0] = np.clip(self.joints[0] + step, *self.JOINT_LIMITS['joint1'])
+            self.joints[0] = np.clip(self.joints[0] + step, *self._get_joint_limits('joint1'))
             action = f"J1: {old_val:.0f} -> {self.joints[0]:.0f} (+)"
 
         elif cmd == '3':
             old_val = self.joints[1]
-            self.joints[1] = np.clip(self.joints[1] - step, *self.JOINT_LIMITS['joint2'])
+            self.joints[1] = np.clip(self.joints[1] - step, *self._get_joint_limits('joint2'))
             action = f"J2: {old_val:.0f} -> {self.joints[1]:.0f} (-)"
         elif cmd == '4':
             old_val = self.joints[1]
-            self.joints[1] = np.clip(self.joints[1] + step, *self.JOINT_LIMITS['joint2'])
+            self.joints[1] = np.clip(self.joints[1] + step, *self._get_joint_limits('joint2'))
             action = f"J2: {old_val:.0f} -> {self.joints[1]:.0f} (+)"
 
         elif cmd == '5':
             old_val = self.joints[2]
-            self.joints[2] = np.clip(self.joints[2] - step, *self.JOINT_LIMITS['joint3'])
+            self.joints[2] = np.clip(self.joints[2] - step, *self._get_joint_limits('joint3'))
             action = f"J3: {old_val:.0f} -> {self.joints[2]:.0f} (-)"
         elif cmd == '6':
             old_val = self.joints[2]
-            self.joints[2] = np.clip(self.joints[2] + step, *self.JOINT_LIMITS['joint3'])
+            self.joints[2] = np.clip(self.joints[2] + step, *self._get_joint_limits('joint3'))
             action = f"J3: {old_val:.0f} -> {self.joints[2]:.0f} (+)"
 
         elif cmd == '7':
             old_val = self.joints[3]
-            self.joints[3] = np.clip(self.joints[3] - step, *self.JOINT_LIMITS['joint4'])
+            self.joints[3] = np.clip(self.joints[3] - step, *self._get_joint_limits('joint4'))
             action = f"J4: {old_val:.0f} -> {self.joints[3]:.0f} (-)"
         elif cmd == '8':
             old_val = self.joints[3]
-            self.joints[3] = np.clip(self.joints[3] + step, *self.JOINT_LIMITS['joint4'])
+            self.joints[3] = np.clip(self.joints[3] + step, *self._get_joint_limits('joint4'))
             action = f"J4: {old_val:.0f} -> {self.joints[3]:.0f} (+)"
 
         elif cmd in ['+', '=']:
@@ -1350,11 +1391,22 @@ class QarmSimulator:
             self.rotate_view(5)
             action = f"View: {self.view_angle:.0f} deg"
 
+        elif cmd == 'p':
+            # Toggle physics constraints
+            self.physics_enabled = not self.physics_enabled
+            status = "ON" if self.physics_enabled else "OFF"
+            limits_mode = "Hardware" if self.physics_enabled else "Free (±180°)"
+            action = f"Physics: {status} ({limits_mode})"
+            print(f"  -> Physics constraints: {status}")
+            print(f"  -> Joint limits: {limits_mode}")
+            # Update slider ranges to reflect new limits
+            self._update_slider_ranges()
+
         elif cmd == 'h':
             print("\n--- Commands (30° per step) ---")
             print("1/2: J1 +/- | 3/4: J2 +/- | 5/6: J3 +/- | 7/8: J4 +/-")
             print("+/-: Zoom    | a/d: View   | v: Joint View | g: Random Target")
-            print("r: Reset     | q: Quit")
+            print("r: Reset     | p: Physics  | q: Quit")
             print("---------------\n")
             action = "Help displayed"
 
@@ -1397,35 +1449,35 @@ class QarmSimulator:
 
         if event.key == '1':
             old_val = self.joints[0]
-            self.joints[0] = np.clip(self.joints[0] - step, *self.JOINT_LIMITS['joint1'])
+            self.joints[0] = np.clip(self.joints[0] - step, *self._get_joint_limits('joint1'))
             action = f"J1: {old_val:.0f} -> {self.joints[0]:.0f} (DECREASE)"
         elif event.key == '2':
             old_val = self.joints[0]
-            self.joints[0] = np.clip(self.joints[0] + step, *self.JOINT_LIMITS['joint1'])
+            self.joints[0] = np.clip(self.joints[0] + step, *self._get_joint_limits('joint1'))
             action = f"J1: {old_val:.0f} -> {self.joints[0]:.0f} (INCREASE)"
         elif event.key == '3':
             old_val = self.joints[1]
-            self.joints[1] = np.clip(self.joints[1] - step, *self.JOINT_LIMITS['joint2'])
+            self.joints[1] = np.clip(self.joints[1] - step, *self._get_joint_limits('joint2'))
             action = f"J2: {old_val:.0f} -> {self.joints[1]:.0f} (DECREASE)"
         elif event.key == '4':
             old_val = self.joints[1]
-            self.joints[1] = np.clip(self.joints[1] + step, *self.JOINT_LIMITS['joint2'])
+            self.joints[1] = np.clip(self.joints[1] + step, *self._get_joint_limits('joint2'))
             action = f"J2: {old_val:.0f} -> {self.joints[1]:.0f} (INCREASE)"
         elif event.key == '5':
             old_val = self.joints[2]
-            self.joints[2] = np.clip(self.joints[2] - step, *self.JOINT_LIMITS['joint3'])
+            self.joints[2] = np.clip(self.joints[2] - step, *self._get_joint_limits('joint3'))
             action = f"J3: {old_val:.0f} -> {self.joints[2]:.0f} (DECREASE)"
         elif event.key == '6':
             old_val = self.joints[2]
-            self.joints[2] = np.clip(self.joints[2] + step, *self.JOINT_LIMITS['joint3'])
+            self.joints[2] = np.clip(self.joints[2] + step, *self._get_joint_limits('joint3'))
             action = f"J3: {old_val:.0f} -> {self.joints[2]:.0f} (INCREASE)"
         elif event.key == '7':
             old_val = self.joints[3]
-            self.joints[3] = np.clip(self.joints[3] - step, *self.JOINT_LIMITS['joint4'])
+            self.joints[3] = np.clip(self.joints[3] - step, *self._get_joint_limits('joint4'))
             action = f"J4: {old_val:.0f} -> {self.joints[3]:.0f} (DECREASE)"
         elif event.key == '8':
             old_val = self.joints[3]
-            self.joints[3] = np.clip(self.joints[3] + step, *self.JOINT_LIMITS['joint4'])
+            self.joints[3] = np.clip(self.joints[3] + step, *self._get_joint_limits('joint4'))
             action = f"J4: {old_val:.0f} -> {self.joints[3]:.0f} (INCREASE)"
         elif event.key == '+' or event.key == '=':
             self.set_zoom(0.1)
@@ -1565,9 +1617,13 @@ class QarmSimulator:
         else:
             joint_view_text = ""
 
+        # Physics limits status
+        physics_status = "ON (Hardware)" if self.physics_enabled else "OFF (Free ±180°)"
+
         title_text = (
             f'Qarm Simulation (Real-Time Mode)\n'
-            f'{joint_info} | Zoom: {self.zoom:.1f}x | View: {view_name} ({self.elev:.0f}°, {self.azim:.0f}°){joint_view_text}'
+            f'{joint_info} | Zoom: {self.zoom:.1f}x | View: {view_name} ({self.elev:.0f}°, {self.azim:.0f}°){joint_view_text}\n'
+            f'Physics: {physics_status}'
         )
         self.ax.set_title(title_text, fontsize=10, fontweight='bold')
 
