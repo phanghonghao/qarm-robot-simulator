@@ -14,7 +14,7 @@ from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.patches import FancyArrowPatch
 from mpl_toolkits.mplot3d import proj3d
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, Slider
 
 
 class Arrow3D(FancyArrowPatch):
@@ -45,10 +45,11 @@ class QarmSimulator:
 
     # Qarm link lengths (meters, based on Quanser Qarm specifications)
     LINK_LENGTHS = {
-        'base_height': 0.08,     # Base height
-        'link1': 0.14,           # Link 1 (upper arm: shoulder to elbow)
-        'link2': 0.14,           # Link 2 (forearm: elbow to wrist)
-        'link3': 0.06,           # Link 3 (hand: wrist to end effector)
+        'base_height': 0.08,           # Base height
+        'shoulder_box': [0.35, 0.1, 0.14],  # Shoulder joint box (X, Y, Z dimensions)
+        'link1': 0.3536,               # Link 1 (upper arm: shoulder to elbow)
+        'link2': 0.25,                 # Link 2 (forearm: elbow to wrist)
+        'link3': 0.16,                 # Link 3 (V-gripper: wrist to end, length = 0.16m)
     }
 
     # Qarm joint limits (degrees, based on hardware specifications)
@@ -102,6 +103,10 @@ class QarmSimulator:
         self.is_animating = False
         self.animation_target = None
         self.view_buttons = []  # Store button references
+        self.view_buttons_dict = {}  # Store buttons by view name for label updates
+
+        # Current view state for toggle functionality
+        self.current_view = 'default'  # 'front', 'back', 'left', 'right', 'top', 'bottom', 'default'
 
         # Joint view mode (press 'v' to cycle)
         self.joint_view_mode = None  # None, 1, 2, 3, or 4
@@ -170,7 +175,7 @@ class QarmSimulator:
         # Joint 3 (elbow bend): bend angle relative to upper arm
         # j3=0 means forearm continues in upper arm direction
         # j3>0 means forearm bends upward
-        elbow_bend = np.radians(j3)  # Convert degrees to radians
+        elbow_bend = j3  # Already in radians from line 137
         forearm_pitch = shoulder_pitch + elbow_bend
 
         # Forearm end (wrist position)
@@ -183,7 +188,7 @@ class QarmSimulator:
 
         # Joint 4 (wrist): end effector
         # j4 affects end effector direction, simplified here
-        wrist_bend = np.radians(j4)  # Convert degrees to radians
+        wrist_bend = j4  # Already in radians from line 137
         end_pitch = forearm_pitch + wrist_bend
         end_local = np.array([
             self.LINK_LENGTHS['link3'] * np.cos(end_pitch) * np.sin(horizontal_angle),
@@ -496,6 +501,9 @@ class QarmSimulator:
         self._draw_gripper(positions['wrist'], positions['end'], self.joints)
 
         # Draw joints
+        # Draw shoulder joint box
+        self._draw_shoulder_box(positions['shoulder'])
+
         # Shoulder joint
         self.ax.scatter(
             [positions['shoulder'][0]], [positions['shoulder'][1]], [positions['shoulder'][2]],
@@ -511,14 +519,10 @@ class QarmSimulator:
             [positions['wrist'][0]], [positions['wrist'][1]], [positions['wrist'][2]],
             color='brown', s=100, marker='o', alpha=0.8, label='Wrist'
         )
-        # End effector
-        self.ax.scatter(
-            [positions['end'][0]], [positions['end'][1]], [positions['end'][2]],
-            color='darkred', s=250, marker='*', alpha=1.0, label='End Effector'
-        )
 
-        # Draw axis indicator
-        self._draw_axis_indicator(positions['shoulder'])
+        # Draw axis indicator at each joint
+        for joint_name in ['shoulder', 'elbow', 'wrist']:
+            self._draw_axis_indicator(positions[joint_name])
 
         # Draw joint rotation axis if in joint view mode
         if self.joint_view_mode is not None:
@@ -596,6 +600,65 @@ class QarmSimulator:
         X, Y = np.meshgrid(x, y)
         Z = np.zeros_like(X)
         self.ax.plot_surface(X, Y, Z, alpha=0.05, color='green')
+
+    def _draw_shoulder_box(self, shoulder_pos):
+        """
+        Draw shoulder joint as a rectangular box
+
+        Args:
+            shoulder_pos: Center position of shoulder joint (x, y, z)
+        """
+        sx, sy, sz = self.LINK_LENGTHS['shoulder_box']
+        x, y, z = shoulder_pos
+
+        # Define the 8 vertices of the box
+        # Box is centered at shoulder_pos
+        vertices = np.array([
+            [x - sx/2, y - sy/2, z - sz/2],  # 0: back-bottom-left
+            [x + sx/2, y - sy/2, z - sz/2],  # 1: back-bottom-right
+            [x + sx/2, y + sy/2, z - sz/2],  # 2: back-top-right
+            [x - sx/2, y + sy/2, z - sz/2],  # 3: back-top-left
+            [x - sx/2, y - sy/2, z + sz/2],  # 4: front-bottom-left
+            [x + sx/2, y - sy/2, z + sz/2],  # 5: front-bottom-right
+            [x + sx/2, y + sy/2, z + sz/2],  # 6: front-top-right
+            [x - sx/2, y + sy/2, z + sz/2],  # 7: front-top-left
+        ])
+
+        # Define the 12 edges of the box
+        edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # back face
+            [4, 5], [5, 6], [6, 7], [7, 4],  # front face
+            [0, 4], [1, 5], [2, 6], [3, 7],  # connecting edges
+        ]
+
+        # Draw edges
+        for edge in edges:
+            self.ax.plot3D(
+                [vertices[edge[0], 0], vertices[edge[1], 0]],
+                [vertices[edge[0], 1], vertices[edge[1], 1]],
+                [vertices[edge[0], 2], vertices[edge[1], 2]],
+                'k-', linewidth=2, alpha=0.6
+            )
+
+        # Draw semi-transparent faces
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        # Define faces using vertex indices
+        faces = [
+            [vertices[0], vertices[1], vertices[2], vertices[3]],  # back
+            [vertices[4], vertices[5], vertices[6], vertices[7]],  # front
+            [vertices[0], vertices[1], vertices[5], vertices[4]],  # bottom
+            [vertices[2], vertices[3], vertices[7], vertices[6]],  # top
+            [vertices[0], vertices[3], vertices[7], vertices[4]],  # left
+            [vertices[1], vertices[2], vertices[6], vertices[5]],  # right
+        ]
+
+        # Add faces as a polygon collection
+        face_collection = Poly3DCollection(faces, alpha=0.2, facecolor='lightblue', edgecolor='black')
+        self.ax.add_collection3d(face_collection)
+
+        # Add label
+        self.ax.text(x, y, z + sz/2 + 0.05, 'Shoulder', fontsize=9, ha='center')
 
     def _draw_axis_indicator(self, origin):
         """Draw 3D axis indicator at specified position"""
@@ -735,16 +798,16 @@ class QarmSimulator:
 
     def _draw_gripper(self, wrist_pos, end_pos, joints):
         """
-        Draw V-shaped gripper that shows wrist rotation clearly
+        Draw V-shaped gripper (140° opening angle, 0.16m length)
 
         Args:
             wrist_pos: Wrist joint position (x, y, z)
             end_pos: End effector position (x, y, z)
             joints: Current joint angles [j1, j2, j3, j4]
         """
-        # Gripper parameters
-        finger_length = 0.04  # Length of each finger
-        finger_spread = 0.025  # Half-width of gripper opening
+        # V-gripper parameters
+        v_angle = 140  # V opening angle in degrees
+        v_angle_rad = np.radians(v_angle / 2)  # Half angle for each side
 
         # Calculate gripper direction vector (from wrist to end)
         gripper_vector = np.array(end_pos) - np.array(wrist_pos)
@@ -757,12 +820,10 @@ class QarmSimulator:
         # Get wrist rotation angle (j4)
         j4_rad = np.radians(joints[3])
 
-        # Create a coordinate system at the end effector
-        # Forward direction (along arm)
+        # Create a coordinate system at the wrist
         forward = gripper_dir
 
         # Create a perpendicular vector for the gripper opening plane
-        # Use a reference vector that's not parallel to forward
         if abs(forward[2]) < 0.9:
             ref = np.array([0, 0, 1])
         else:
@@ -778,54 +839,42 @@ class QarmSimulator:
         up = np.cross(right, forward)
 
         # Apply wrist rotation to right and up vectors
-        # Rotation around the forward axis (wrist rotation)
         cos_j4 = np.cos(j4_rad)
         sin_j4 = np.sin(j4_rad)
-
-        # Rotated right vector
         right_rot = cos_j4 * right + sin_j4 * up
-        # Rotated up vector
         up_rot = -sin_j4 * right + cos_j4 * up
 
-        # Finger 1 (left finger) - extends forward and to the left
-        finger1_dir = 0.7 * forward + 0.7 * right_rot
+        # Calculate V-gripper finger directions
+        # Each finger opens at v_angle/2 from the forward direction
+        # Finger 1 (cyan) - opens to the left
+        finger1_dir = np.cos(v_angle_rad) * forward + np.sin(v_angle_rad) * right_rot
         finger1_dir = finger1_dir / np.linalg.norm(finger1_dir)
-        finger1_end = np.array(end_pos) + finger_length * finger1_dir
 
-        # Finger 2 (right finger) - extends forward and to the right
-        finger2_dir = 0.7 * forward - 0.7 * right_rot
+        # Finger 2 (magenta) - opens to the right
+        finger2_dir = np.cos(v_angle_rad) * forward - np.sin(v_angle_rad) * right_rot
         finger2_dir = finger2_dir / np.linalg.norm(finger2_dir)
-        finger2_end = np.array(end_pos) + finger_length * finger2_dir
 
-        # Draw the gripper base
+        # Finger 1 (cyan): from wrist to end at 70° angle
+        finger1_end = np.array(wrist_pos) + gripper_length * finger1_dir
         self.ax.plot(
-            [wrist_pos[0], end_pos[0]],
-            [wrist_pos[1], end_pos[1]],
-            [wrist_pos[2], end_pos[2]],
-            color='orange', linewidth=4, label='Wrist'
+            [wrist_pos[0], finger1_end[0]],
+            [wrist_pos[1], finger1_end[1]],
+            [wrist_pos[2], finger1_end[2]],
+            color='cyan', linewidth=4, marker='o', markersize=3
         )
 
-        # Draw finger 1 (cyan)
+        # Finger 2 (magenta): from wrist to end at -70° angle
+        finger2_end = np.array(wrist_pos) + gripper_length * finger2_dir
         self.ax.plot(
-            [end_pos[0], finger1_end[0]],
-            [end_pos[1], finger1_end[1]],
-            [end_pos[2], finger1_end[2]],
-            color='cyan', linewidth=3, marker='o', markersize=4
+            [wrist_pos[0], finger2_end[0]],
+            [wrist_pos[1], finger2_end[1]],
+            [wrist_pos[2], finger2_end[2]],
+            color='magenta', linewidth=4, marker='o', markersize=3
         )
 
-        # Draw finger 2 (magenta)
-        self.ax.plot(
-            [end_pos[0], finger2_end[0]],
-            [end_pos[1], finger2_end[1]],
-            [end_pos[2], finger2_end[2]],
-            color='magenta', linewidth=3, marker='o', markersize=4
-        )
-
-        # Draw end effector marker
-        self.ax.scatter(
-            [end_pos[0]], [end_pos[1]], [end_pos[2]],
-            color='darkred', s=150, marker='*', alpha=1.0
-        )
+        # Draw end effector marker (at the tip of the V, not actual end_pos)
+        # The tip of V is where both fingers meet if extended back
+        # But we show the marker at the visual center between finger tips
 
     def set_zoom(self, zoom_delta):
         """
@@ -871,23 +920,117 @@ class QarmSimulator:
         """Get the name of the current view"""
         view_map = {
             (0, 0): 'FRONT',
-            (0, 90): 'SIDE',
+            (0, 180): 'BACK',
+            (0, 90): 'LEFT SIDE',
+            (0, -90): 'RIGHT SIDE',
             (90, -90): 'TOP',
+            (-90, -90): 'BOTTOM',
             (30, 45): 'ISOMETRIC',
+            (15, 45): 'DEFAULT',
         }
         # Round to handle floating point
         key = (round(self.elev), round(self.azim))
         return view_map.get(key, 'CUSTOM')
 
+    def _add_joint_sliders(self):
+        """Add joint control sliders at the bottom of the figure (2x2 grid layout)"""
+        # Slider configuration: [label, joint_index, x_position, y_position, color]
+        # 2x2 grid layout - adjusted positions to avoid overlap
+        slider_configs = [
+            ('J1: Base', 0, 0.06, 0.30, 'lightcoral'),   # Top-left
+            ('J2: Shoulder', 1, 0.54, 0.30, 'lightblue'),  # Top-right
+            ('J3: Elbow', 2, 0.06, 0.22, 'lightgreen'),   # Bottom-left
+            ('J4: Wrist', 3, 0.54, 0.22, 'lightyellow'),  # Bottom-right
+        ]
+
+        # Store sliders and their axes for hover detection
+        self.joint_sliders = []
+        self.slider_axes = []  # Store slider axes for hover detection
+
+        for label, joint_idx, x_pos, y_pos, color in slider_configs:
+            # Create slider axis [left, bottom, width, height]
+            ax_slider = self.fig.add_axes([x_pos, y_pos, 0.40, 0.025])
+
+            # Get joint limits
+            j_min, j_max = self.JOINT_LIMITS[f'joint{joint_idx + 1}']
+
+            # Create slider
+            slider = Slider(
+                ax=ax_slider,
+                label=label,
+                valmin=j_min,
+                valmax=j_max,
+                valinit=self.joints[joint_idx],
+                color=color,
+                valfmt='%0.1f°'
+            )
+
+            # Connect callback (with joint index)
+            slider.on_changed(lambda val, idx=joint_idx: self._slider_callback(idx, val))
+
+            self.joint_sliders.append(slider)
+            self.slider_axes.append({'ax': ax_slider, 'slider': slider, 'index': joint_idx})
+
+        # Enable hover sliding
+        self._hover_slider_active = None  # Track which slider is being hovered
+        self._last_mouse_x = None
+        self.fig.canvas.mpl_connect('motion_notify_event', self._on_slider_hover)
+        self.fig.canvas.mpl_connect('button_release_event', self._on_slider_release)
+
+    def _on_slider_hover(self, event):
+        """Handle mouse/touch hover over sliders for click-free control"""
+        if event.inaxes is None:
+            return
+
+        # Check if mouse is over any slider
+        for slider_info in self.slider_axes:
+            ax = slider_info['ax']
+            if event.inaxes == ax:
+                slider = slider_info['slider']
+                joint_idx = slider_info['index']
+
+                # Convert x position to slider value
+                x_min, x_max = ax.get_xlim()
+                val = slider.valmin + (event.xdata - x_min) / (x_max - x_min) * (slider.valmax - slider.valmin)
+                val = np.clip(val, slider.valmin, slider.valmax)
+
+                # Update joint angle
+                self.joints[joint_idx] = val
+                slider.set_val(val)
+
+                # Redraw
+                self.ax.clear()
+                positions = self.forward_kinematics(self.joints)
+                self._redraw_quick(positions)
+                self.fig.canvas.draw_idle()
+                break
+
+    def _on_slider_release(self, event):
+        """Handle mouse button release"""
+        pass  # Can be used for additional logic if needed
+
+    def _slider_callback(self, joint_idx, value):
+        """Callback for joint slider changes"""
+        self.joints[joint_idx] = value
+
+        # Quick redraw without full render
+        self.ax.clear()
+        positions = self.forward_kinematics(self.joints)
+        self._redraw_quick(positions)
+        self.fig.canvas.draw_idle()
+
     def _add_view_buttons(self):
         """Add view control buttons at the bottom of the figure"""
-        # Button configuration
+        # Button configuration: [label, view_name, x_position]
         button_configs = [
-            ('Front', 'front', 0.12),
-            ('Side', 'side', 0.30),
-            ('Top', 'top', 0.48),
-            ('Reset', 'reset', 0.66),
+            ('Front', 'front', 0.10),
+            ('Left', 'left', 0.24),
+            ('Top', 'top', 0.38),
+            ('Reset', 'reset', 0.55),
         ]
+
+        # Store button references with their view names for label updates
+        self.view_buttons_dict = {}
 
         for label, view_name, x_pos in button_configs:
             # Create button axis
@@ -897,27 +1040,84 @@ class QarmSimulator:
             # Connect callback
             if view_name == 'reset':
                 btn.on_clicked(self._reset_callback)
+                self.view_buttons_dict['reset'] = btn
             else:
-                btn.on_clicked(lambda event, vn=view_name: self._view_button_callback(vn))
+                btn.on_clicked(lambda event, vn=view_name: self._view_button_callback(vn, btn))
+                self.view_buttons_dict[view_name] = btn
 
             self.view_buttons.append(btn)
 
-    def _view_button_callback(self, view_name):
-        """Callback for view buttons - triggers smooth animation"""
+    def _update_button_labels(self):
+        """Update button labels based on current view"""
+        # Label pairs for toggling
+        label_pairs = {
+            'front': 'Back',
+            'back': 'Front',
+            'left': 'Right',
+            'right': 'Left',
+            'top': 'Bottom',
+            'bottom': 'Top',
+        }
+
+        # Update Front/Back button
+        if self.current_view in ['front', 'back']:
+            self.view_buttons_dict['front'].label.set_text(label_pairs[self.current_view])
+        else:
+            self.view_buttons_dict['front'].label.set_text('Front')
+
+        # Update Left/Right button
+        if self.current_view in ['left', 'right']:
+            self.view_buttons_dict['left'].label.set_text(label_pairs[self.current_view])
+        else:
+            self.view_buttons_dict['left'].label.set_text('Left')
+
+        # Update Top/Bottom button
+        if self.current_view in ['top', 'bottom']:
+            self.view_buttons_dict['top'].label.set_text(label_pairs[self.current_view])
+        else:
+            self.view_buttons_dict['top'].label.set_text('Top')
+
+        self.fig.canvas.draw_idle()
+
+    def _view_button_callback(self, view_name, btn):
+        """Callback for view buttons - toggle between opposite views on second click"""
         if self.is_animating:
             return  # Ignore if already animating
+
+        # View toggle mappings
+        view_toggle_map = {
+            'front': 'back',
+            'back': 'front',
+            'left': 'right',
+            'right': 'left',
+            'top': 'bottom',
+            'bottom': 'top',
+        }
+
+        # Determine target view based on current view
+        if self.current_view == view_name:
+            # Currently on this view, toggle to opposite
+            target_view = view_toggle_map.get(view_name, view_name)
+        else:
+            # Go to the requested view
+            target_view = view_name
 
         # Get target view angles
         preset_views = {
             'front': (0, 0),
-            'side': (0, 90),
+            'back': (0, 180),
+            'left': (0, 90),
+            'right': (0, -90),
             'top': (90, -90),
-            'iso': (30, 45),
+            'bottom': (-90, -90),
+            'default': (15, 45),
         }
 
-        if view_name in preset_views:
-            target_elev, target_azim = preset_views[view_name]
+        if target_view in preset_views:
+            target_elev, target_azim = preset_views[target_view]
+            self.current_view = target_view
             self.animate_view_transition(target_elev, target_azim)
+            self._update_button_labels()
 
     def _reset_callback(self, event):
         """Callback for reset button"""
@@ -926,6 +1126,14 @@ class QarmSimulator:
 
         self.joints = [0, -90, 0, 0]
         self.zoom = 1.0
+        self.current_view = 'default'
+
+        # Reset sliders to initial positions
+        for i, slider in enumerate(self.joint_sliders):
+            slider.set_val(self.joints[i])
+            slider.eventson = False  # Disable callback during reset
+            slider.eventson = True   # Re-enable callback
+
         self.animate_view_transition(15, 45)
 
     def animate_view_transition(self, target_elev, target_azim):
@@ -994,12 +1202,12 @@ class QarmSimulator:
         self.is_animating = False
 
     def interactive_mode(self):
-        """Enable interactive mode with REAL-TIME keyboard control (no Enter needed!)"""
+        """Enable interactive mode with SLIDERS and keyboard control"""
         # Turn on interactive mode
         plt.ion()
 
-        # Adjust figure layout to make room for buttons at bottom
-        self.fig.subplots_adjust(bottom=0.20)
+        # Adjust figure layout to make room for sliders and buttons at bottom
+        self.fig.subplots_adjust(bottom=0.35, left=0.1, right=0.95)
 
         # Position window on the right side (60% width for better visibility)
         try:
@@ -1024,6 +1232,9 @@ class QarmSimulator:
         except:
             print("Could not set window position")
 
+        # Add joint control sliders
+        self._add_joint_sliders()
+
         # Add view control buttons
         self._add_view_buttons()
 
@@ -1033,24 +1244,25 @@ class QarmSimulator:
         self.fig.canvas.mpl_connect('key_release_event', self._on_key_release)
 
         print("\n" + "=" * 60)
-        print("   QARM INTERACTIVE CONTROL MODE - REAL-TIME")
+        print("   QARM INTERACTIVE CONTROL MODE - SLIDERS")
         print("=" * 60)
-        print("\n  REAL-TIME KEYBOARD CONTROLS (Click plot window!):")
+        print("\n  CONTROLS:")
         print("  ════════════════════════════════════════════════")
-        print("  JOINT CONTROLS:")
-        print("    1/2  - Joint 1 (Base rotation)      ±30°")
-        print("    3/4  - Joint 2 (Shoulder pitch)     ±30°")
-        print("    5/6  - Joint 3 (Elbow bend)         ±30°")
-        print("    7/8  - Joint 4 (Wrist rotation)     ±30°")
-        print("  VIEW CONTROLS:")
-        print("    a/d  - Rotate view (±5°)   or click buttons below")
-        print("    v    - Cycle joint view mode (J1→J2→J3→J4→OFF)")
-        print("  OTHER:")
-        print("    +/-  - Zoom in/out        r     - Reset pose")
-        print("    g    - Generate random target + IK + animation")
+        print("  SLIDERS (Bottom):")
+        print("    J1: Base rotation     (-170° ~ +170°)")
+        print("    J2: Shoulder pitch    (-85° ~ +85°)")
+        print("    J3: Elbow bend        (-95° ~ +75°)")
+        print("    J4: Wrist rotation    (-160° ~ +160°)")
+        print("\n  KEYBOARD (Alternative):")
+        print("    1/2  - Joint 1  ±30°    3/4  - Joint 2  ±30°")
+        print("    5/6  - Joint 3  ±30°    7/8  - Joint 4  ±30°")
+        print("\n  VIEW:")
+        print("    a/d  - Rotate view     or click view buttons")
+        print("    +/-  - Zoom in/out     r    - Reset pose")
+        print("    g    - Random target + IK + animation")
         print("    q    - Quit")
         print("  ════════════════════════════════════════════════")
-        print("  >>> CLICK THE PLOT WINDOW TO ENABLE KEYBOARD <<<")
+        print("  >>> USE SLIDERS OR KEYBOARD TO CONTROL JOINTS <<<")
         print("=" * 60 + "\n")
 
         # Initial render
@@ -1311,15 +1523,12 @@ class QarmSimulator:
             [positions['elbow'][2], positions['wrist'][2]],
             'g-', linewidth=5, marker='o', markersize=8
         )
-        self.ax.plot(
-            [positions['wrist'][0], positions['end'][0]],
-            [positions['wrist'][1], positions['end'][1]],
-            [positions['wrist'][2], positions['end'][2]],
-            color='orange', linewidth=4, marker='*', markersize=15
-        )
 
         # Draw V-shaped gripper (shows wrist rotation clearly)
         self._draw_gripper(positions['wrist'], positions['end'], self.joints)
+
+        # Draw shoulder joint box
+        self._draw_shoulder_box(positions['shoulder'])
 
         # Draw joints (shoulder, elbow, wrist - end effector is drawn in gripper)
         for key, color, size in [('shoulder', 'red', 200), ('elbow', 'purple', 150),
@@ -1328,6 +1537,10 @@ class QarmSimulator:
                 [positions[key][0]], [positions[key][1]], [positions[key][2]],
                 color=color, s=size, marker='s' if key == 'shoulder' else 'o', alpha=0.8
             )
+
+        # Draw axis indicator at each joint
+        for joint_name in ['shoulder', 'elbow', 'wrist']:
+            self._draw_axis_indicator(positions[joint_name])
 
         # Draw joint rotation axis if in joint view mode
         if self.joint_view_mode is not None:

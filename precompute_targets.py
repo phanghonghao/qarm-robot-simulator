@@ -45,8 +45,8 @@ def precompute_workspace_targets(output_file='reachable_targets.csv',
         j4 = np.random.uniform(*sim.JOINT_LIMITS['joint4'])
         joints = [j1, j2, j3, j4]
 
-        # Use FK to get end effector position (guaranteed reachable)
-        pos = sim.forward_kinematics(joints)['end']
+        # Use FK to get wrist position (wrist is the end effector)
+        pos = sim.forward_kinematics(joints)['wrist']
 
         # Check if duplicate (too close to existing points)
         is_duplicate = False
