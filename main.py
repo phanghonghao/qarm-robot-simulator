@@ -3,14 +3,11 @@ Hand Pose Control Qarm Demo - Right Arm Only (Optimized)
 Uses matplotlib with incremental updates for smooth performance
 
 Left: Camera hand pose capture (YOLOv8-pose, RIGHT ARM ONLY)
-Right: Qarm 3D simulation following
+Right: Qarm 3D simulation - FOUR VIEW DISPLAY (FRONT, LEFT, TOP, ISO)
 
 Key Controls:
-    '1' - Front view
-    '2' - Side view
-    '3' - Top view
-    '4' - 3D (isometric) view
-    'a' / 'd' - Rotate view left/right
+    'c' - Toggle camera ON/OFF
+    'p' - Toggle physics limits
     'q' - Quit
 """
 
@@ -61,13 +58,36 @@ class HandControlQarmDemo:
 
         # Setup matplotlib figure
         plt.ion()
-        self.fig = plt.figure(figsize=(12, 5))
-        self.fig.canvas.manager.set_window_title('Hand Pose Control Qarm - Right Arm (Auto Mode)')
-        self.fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.05, wspace=0.1)
+        self.fig = plt.figure(figsize=(14, 6))
+        self.fig.canvas.manager.set_window_title('Hand Pose Control Qarm - Four View Display')
+        self.fig.subplots_adjust(left=0.03, right=0.97, top=0.92, bottom=0.05, wspace=0.15, hspace=0.2)
 
-        # Create subplots (only once!)
+        # Create grid layout: left side camera, right side 2x2 3D views
+        # Left: Camera (1 column)
         self.ax_cam = self.fig.add_subplot(1, 2, 1)
-        self.ax_3d = self.fig.add_subplot(1, 2, 2, projection='3d')
+
+        # Right: 2x2 grid for 3D views
+        # Position: [left, bottom, width, height]
+        self.ax_front = self.fig.add_axes([0.55, 0.52, 0.20, 0.38], projection='3d')  # FRONT (top-left)
+        self.ax_left = self.fig.add_axes([0.77, 0.52, 0.20, 0.38], projection='3d')   # LEFT (top-right)
+        self.ax_top = self.fig.add_axes([0.55, 0.08, 0.20, 0.38], projection='3d')    # TOP (bottom-left)
+        self.ax_iso = self.fig.add_axes([0.77, 0.08, 0.20, 0.38], projection='3d')    # ISO (bottom-right)
+
+        # Store axes in dictionary for easy access
+        self.axes_3d = {
+            'front': self.ax_front,
+            'left': self.ax_left,
+            'top': self.ax_top,
+            'iso': self.ax_iso
+        }
+
+        # Four view configurations
+        self.view_configs = {
+            'front': {'elev': 0, 'azim': 0, 'title': 'FRONT'},
+            'left': {'elev': 0, 'azim': 90, 'title': 'LEFT'},
+            'top': {'elev': 90, 'azim': -90, 'title': 'TOP'},
+            'iso': {'elev': 30, 'azim': 45, 'title': 'ISO'}
+        }
 
         # Initialize camera image display
         ret, frame = self.cap.read()
@@ -97,7 +117,7 @@ class HandControlQarmDemo:
                                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
 
         # Help text - key controls (at top to avoid blocking camera view)
-        help_text = "1:FRONT  2:LEFT  3:TOP  4:ISO  C:CAM  P:PHYS  Q:QUIT"
+        help_text = "C:CAM  P:PHYS  Q:QUIT"
         self.text_help = self.ax_cam.text(0.5, 0.98, help_text, transform=self.ax_cam.transAxes,
                                           fontsize=10, ha='center', fontweight='bold',
                                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.8))
@@ -131,35 +151,52 @@ class HandControlQarmDemo:
         self._print_controls()
 
     def _init_3d_objects(self):
-        """Initialize 3D plot objects (created once, updated in loop)"""
-        # Set view angle
-        self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-
-        # Set axis limits (once)
-        max_reach = 0.35
+        """Initialize 3D plot objects for all four views (created once, updated in loop)"""
+        # Axis limits (same for all views)
         limit = 0.3
-        self.ax_3d.set_xlim(-limit, limit)
-        self.ax_3d.set_ylim(-limit * 0.3, limit)
-        self.ax_3d.set_zlim(0, 0.6)
-        self.ax_3d.set_xlabel('X (m)', fontsize=7)
-        self.ax_3d.set_ylabel('Y (m)', fontsize=7)
-        self.ax_3d.set_zlabel('Z (m)', fontsize=7)
-        self.ax_3d.grid(True, alpha=0.3)
+        z_limit = 0.6
 
-        # Store line objects for updating
-        self.line_base, = self.ax_3d.plot([], [], [], 'k-', linewidth=6, alpha=0.7)
-        self.line_upper, = self.ax_3d.plot([], [], [], 'b-', linewidth=5, marker='o', markersize=6)
-        self.line_fore, = self.ax_3d.plot([], [], [], 'g-', linewidth=4, marker='o', markersize=5)
-        self.line_finger1, = self.ax_3d.plot([], [], [], color='cyan', linewidth=2, marker='o', markersize=3)
-        self.line_finger2, = self.ax_3d.plot([], [], [], color='magenta', linewidth=2, marker='o', markersize=3)
+        # Store line and scatter objects for each view
+        self.lines_3d = {}
+        self.scatters_3d = {}
+        self.titles_3d = {}
 
-        # Joint markers (scatter - but create once)
-        self.scatter_should = self.ax_3d.scatter([], [], [], color='red', s=100, marker='s', alpha=0.8)
-        self.scatter_elbow = self.ax_3d.scatter([], [], [], color='purple', s=80, marker='o', alpha=0.8)
-        self.scatter_wrist = self.ax_3d.scatter([], [], [], color='brown', s=60, marker='o', alpha=0.8)
+        for view_name, ax in self.axes_3d.items():
+            config = self.view_configs[view_name]
 
-        # Title
-        self.title_3d = self.ax_3d.set_title('Qarm 3D Simulation', fontsize=11, fontweight='bold')
+            # Set view angle
+            ax.view_init(elev=config['elev'], azim=config['azim'])
+
+            # Set axis limits
+            ax.set_xlim(-limit, limit)
+            ax.set_ylim(-limit * 0.3, limit)
+            ax.set_zlim(0, z_limit)
+            ax.set_xlabel('X', fontsize=6)
+            ax.set_ylabel('Y', fontsize=6)
+            ax.set_zlabel('Z', fontsize=6)
+            ax.grid(True, alpha=0.3)
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.set_zticklabels([])
+
+            # Store line objects for this view
+            self.lines_3d[view_name] = {
+                'base': ax.plot([], [], [], 'k-', linewidth=5, alpha=0.7)[0],
+                'upper': ax.plot([], [], [], 'b-', linewidth=4, marker='o', markersize=4)[0],
+                'fore': ax.plot([], [], [], 'g-', linewidth=3, marker='o', markersize=3)[0],
+                'finger1': ax.plot([], [], [], color='cyan', linewidth=1.5, marker='o', markersize=2)[0],
+                'finger2': ax.plot([], [], [], color='magenta', linewidth=1.5, marker='o', markersize=2)[0]
+            }
+
+            # Store scatter objects for this view
+            self.scatters_3d[view_name] = {
+                'shoulder': ax.scatter([], [], [], color='red', s=50, marker='s', alpha=0.8),
+                'elbow': ax.scatter([], [], [], color='purple', s=40, marker='o', alpha=0.8),
+                'wrist': ax.scatter([], [], [], color='brown', s=30, marker='o', alpha=0.8)
+            }
+
+            # Title
+            self.titles_3d[view_name] = ax.set_title(f"Qarm {config['title']}", fontsize=9, fontweight='bold')
 
     def _print_controls(self):
         """Print control instructions"""
@@ -167,15 +204,9 @@ class HandControlQarmDemo:
         print("  HAND POSE CONTROL QARM - AUTO MODE")
         print("=" * 50)
         print("\n  MODE: AUTO (Right Arm Tracking)")
+        print("  DISPLAY: Four View (FRONT, LEFT, TOP, ISO)")
         print("\n  KEYBOARD:")
         print("  ═════════")
-        print("  VIEW CONTROLS:")
-        print("    1    - Front view")
-        print("    2    - Side view")
-        print("    3    - Top view")
-        print("    4    - 3D (isometric) view")
-        print("    a/d  - Rotate view left/right")
-        print("  OTHER:")
         print("    c    - Toggle camera ON/OFF")
         print("    p    - Toggle physics limits (ON: hardware / OFF: free ±180°)")
         print("    q    - Quit")
@@ -212,54 +243,6 @@ class HandControlQarmDemo:
             self.sim.physics_enabled = not self.sim.physics_enabled
             status = "ON (Hardware)" if self.sim.physics_enabled else "OFF (Free ±180°)"
             print(f"Physics Limits: {status}")
-
-        # View controls (with toggle support)
-        elif key == '1':
-            # Toggle between front and back
-            if self.current_view == 'front':
-                target = 'back'
-            else:
-                target = 'front'
-            self.elev, self.azim = self.preset_views[target]
-            self.current_view = target
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-            self._update_help_text()
-            print(f"View: {target.upper()}")
-        elif key == '2':
-            # Toggle between left and right
-            if self.current_view == 'left':
-                target = 'right'
-            else:
-                target = 'left'
-            self.elev, self.azim = self.preset_views[target]
-            self.current_view = target
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-            self._update_help_text()
-            print(f"View: {target.upper()}")
-        elif key == '3':
-            # Toggle between top and bottom
-            if self.current_view == 'top':
-                target = 'bottom'
-            else:
-                target = 'top'
-            self.elev, self.azim = self.preset_views[target]
-            self.current_view = target
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-            self._update_help_text()
-            print(f"View: {target.upper()}")
-        elif key == '4':
-            # ISO stays ISO
-            self.elev, self.azim = self.preset_views['iso']
-            self.current_view = 'iso'
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-            self._update_help_text()
-            print("View: ISO")
-        elif key == 'a':
-            self.azim = (self.azim - 10) % 360
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
-        elif key == 'd':
-            self.azim = (self.azim + 10) % 360
-            self.ax_3d.view_init(elev=self.elev, azim=self.azim)
 
     def process_camera(self):
         """Capture and process camera frame"""
@@ -310,23 +293,10 @@ class HandControlQarmDemo:
             self.text_elbow.set_text("")
 
     def update_3d_view(self):
-        """Update 3D view (incremental, no clear)"""
+        """Update all four 3D views (incremental, no clear)"""
         positions = self.sim.forward_kinematics(self.sim.joints)
 
-        # Update lines
-        self.line_base.set_data([positions['base'][0], positions['shoulder'][0]],
-                               [positions['base'][1], positions['shoulder'][1]])
-        self.line_base.set_3d_properties([positions['base'][2], positions['shoulder'][2]])
-
-        self.line_upper.set_data([positions['shoulder'][0], positions['elbow'][0]],
-                                [positions['shoulder'][1], positions['elbow'][1]])
-        self.line_upper.set_3d_properties([positions['shoulder'][2], positions['elbow'][2]])
-
-        self.line_fore.set_data([positions['elbow'][0], positions['wrist'][0]],
-                               [positions['elbow'][1], positions['wrist'][1]])
-        self.line_fore.set_3d_properties([positions['elbow'][2], positions['wrist'][2]])
-
-        # Update gripper (simplified V-shape)
+        # Calculate gripper positions (shared by all views)
         wrist_pos = np.array(positions['wrist'])
         end_pos = np.array(positions['end'])
         gripper_vector = end_pos - wrist_pos
@@ -349,48 +319,44 @@ class HandControlQarmDemo:
         cos_j4 = np.cos(j4_rad)
         sin_j4 = np.sin(j4_rad)
 
-        # Finger 1
+        # Finger positions
         finger1_end = end_pos + 0.04 * (0.7 * gripper_dir + 0.7 * (cos_j4 * right + sin_j4 * np.cross(gripper_dir, right)))
-        # Finger 2
         finger2_end = end_pos + 0.04 * (0.7 * gripper_dir - 0.7 * (cos_j4 * right + sin_j4 * np.cross(gripper_dir, right)))
 
-        self.line_finger1.set_data([wrist_pos[0], finger1_end[0]], [wrist_pos[1], finger1_end[1]])
-        self.line_finger1.set_3d_properties([wrist_pos[2], finger1_end[2]])
+        # Update each view
+        for view_name, ax in self.axes_3d.items():
+            lines = self.lines_3d[view_name]
+            scatters = self.scatters_3d[view_name]
 
-        self.line_finger2.set_data([wrist_pos[0], finger2_end[0]], [wrist_pos[1], finger2_end[1]])
-        self.line_finger2.set_3d_properties([wrist_pos[2], finger2_end[2]])
+            # Update lines
+            lines['base'].set_data([positions['base'][0], positions['shoulder'][0]],
+                                   [positions['base'][1], positions['shoulder'][1]])
+            lines['base'].set_3d_properties([positions['base'][2], positions['shoulder'][2]])
 
-        # Update scatter positions
-        self.scatter_should._offsets3d = ([positions['shoulder'][0]], [positions['shoulder'][1]], [positions['shoulder'][2]])
-        self.scatter_elbow._offsets3d = ([positions['elbow'][0]], [positions['elbow'][1]], [positions['elbow'][2]])
-        self.scatter_wrist._offsets3d = ([positions['wrist'][0]], [positions['wrist'][1]], [positions['wrist'][2]])
+            lines['upper'].set_data([positions['shoulder'][0], positions['elbow'][0]],
+                                    [positions['shoulder'][1], positions['elbow'][1]])
+            lines['upper'].set_3d_properties([positions['shoulder'][2], positions['elbow'][2]])
 
-        # Update title
-        joint_info = f"J1:{self.sim.joints[0]:.0f} J2:{self.sim.joints[1]:.0f} J3:{self.sim.joints[2]:.0f} J4:{self.sim.joints[3]:.0f}"
-        view_name = self._get_view_name()
-        physics_status = "ON" if self.sim.physics_enabled else "OFF"
-        self.title_3d.set_text(f'Qarm 3D Simulation | {view_name}\n{joint_info} | Physics: {physics_status}')
+            lines['fore'].set_data([positions['elbow'][0], positions['wrist'][0]],
+                                   [positions['elbow'][1], positions['wrist'][1]])
+            lines['fore'].set_3d_properties([positions['elbow'][2], positions['wrist'][2]])
 
-    def _update_help_text(self):
-        """Update help text based on current view state"""
-        # Get label for each key based on current view
-        key_labels = {
-            '1': 'BACK' if self.current_view == 'front' else 'FRONT',
-            '2': 'RIGHT' if self.current_view == 'left' else 'LEFT',
-            '3': 'BOTTOM' if self.current_view == 'top' else 'TOP',
-            '4': 'ISO'
-        }
-        help_text = f"1:{key_labels['1']}  2:{key_labels['2']}  3:{key_labels['3']}  4:{key_labels['4']}  C:CAM  Q:QUIT"
-        self.text_help.set_text(help_text)
+            # Update gripper
+            lines['finger1'].set_data([wrist_pos[0], finger1_end[0]], [wrist_pos[1], finger1_end[1]])
+            lines['finger1'].set_3d_properties([wrist_pos[2], finger1_end[2]])
 
-    def _get_view_name(self):
-        """Get the name of the current view"""
-        # Check preset views
-        for name, (e, a) in self.preset_views.items():
-            if abs(self.elev - e) < 1 and abs(self.azim - a) < 1:
-                return name.upper()
-        # Custom view
-        return f"CUSTOM ({self.elev:.0f}°, {self.azim:.0f}°)"
+            lines['finger2'].set_data([wrist_pos[0], finger2_end[0]], [wrist_pos[1], finger2_end[1]])
+            lines['finger2'].set_3d_properties([wrist_pos[2], finger2_end[2]])
+
+            # Update scatter positions
+            scatters['shoulder']._offsets3d = ([positions['shoulder'][0]], [positions['shoulder'][1]], [positions['shoulder'][2]])
+            scatters['elbow']._offsets3d = ([positions['elbow'][0]], [positions['elbow'][1]], [positions['elbow'][2]])
+            scatters['wrist']._offsets3d = ([positions['wrist'][0]], [positions['wrist'][1]], [positions['wrist'][2]])
+
+            # Update title with joint info
+            joint_info = f"J1:{self.sim.joints[0]:.0f} J2:{self.sim.joints[1]:.0f} J3:{self.sim.joints[2]:.0f} J4:{self.sim.joints[3]:.0f}"
+            physics_status = "ON" if self.sim.physics_enabled else "OFF"
+            self.titles_3d[view_name].set_text(f"{self.view_configs[view_name]['title']}\n{joint_info} | P:{physics_status}")
 
     def run(self):
         """Run main loop with incremental updates"""
